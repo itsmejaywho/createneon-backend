@@ -10,7 +10,6 @@ dotenv.config()
 
 const app = express()
 const port = Number(process.env.PORT) || 4000
-const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173'
 const loginAttemptWindowMs = 15 * 60 * 1000
 const maxLoginAttempts = 5
 const loginAttempts = new Map()
@@ -22,32 +21,11 @@ if (!jwtSecret) {
 }
 
 app.disable('x-powered-by')
-
-function normalizeOrigin(origin) {
-  return String(origin || '').trim().replace(/\/+$/, '')
-}
-
-const allowedOrigins = corsOrigin
-  .split(',')
-  .map(normalizeOrigin)
-  .filter(Boolean)
-
 const corsOptions = {
-  origin(origin, callback) {
-    if (!origin) {
-      callback(null, true)
-      return
-    }
-
-    const normalizedOrigin = normalizeOrigin(origin)
-
-    if (allowedOrigins.includes(normalizedOrigin)) {
-      callback(null, true)
-      return
-    }
-
-    callback(new Error(`Origin ${normalizedOrigin} is not allowed by CORS.`))
-  },
+  origin: true,
+  methods: ['GET', 'HEAD', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
 }
 
 app.use(cors(corsOptions))
