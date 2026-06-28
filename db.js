@@ -5,12 +5,37 @@ dotenv.config()
 
 const { Pool } = pg
 
-if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL is not set. Add it to createneon-backend/.env')
+function buildConnectionStringFromPgEnv() {
+  const host = process.env.PGHOST
+  const port = process.env.PGPORT || '5432'
+  const database = process.env.PGDATABASE
+  const user = process.env.PGUSER
+  const password = process.env.PGPASSWORD
+
+  if (!host || !database || !user || !password) {
+    return null
+  }
+
+  const connectionUrl = new URL('postgresql://localhost')
+  connectionUrl.hostname = host
+  connectionUrl.port = port
+  connectionUrl.pathname = `/${database}`
+  connectionUrl.username = user
+  connectionUrl.password = password
+
+  return connectionUrl.toString()
+}
+
+const connectionString = process.env.DATABASE_URL || buildConnectionStringFromPgEnv()
+
+if (!connectionString) {
+  throw new Error(
+    'Database connection is not configured. Set DATABASE_URL or the PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD variables.',
+  )
 }
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString,
 })
 
 export async function query(text, params = []) {
