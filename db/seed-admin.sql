@@ -1,0 +1,3 @@
+-- Replace the password hash after running:
+-- npm run seed:admin -- admin your_password_here
+-- This file is optional if you use the seed script instead.
