@@ -153,6 +153,73 @@ export function createOpenApiDocument(port) {
           },
         },
       },
+      '/api/logo-design': {
+        post: {
+          summary: 'Save logo design quote',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    customerType: { type: 'string' },
+                    fileName: { type: 'string' },
+                    sizeNeeded: { type: 'string' },
+                    quantityNeeded: { type: 'string' },
+                    projectTimeline: { type: 'string' },
+                    technologyNeeded: { type: 'string' },
+                    usage: { type: 'string' },
+                    description: { type: 'string' },
+                    firstName: { type: 'string' },
+                    lastName: { type: 'string' },
+                    workEmail: { type: 'string' },
+                    companyName: { type: 'string' },
+                    countryCode: { type: 'string' },
+                    countryName: { type: 'string' },
+                    phoneDialCode: { type: 'string' },
+                    phoneNumber: { type: 'string' },
+                    hearAboutUs: { type: 'string' },
+                    promoOptIn: { type: 'boolean' },
+                    smsOptIn: { type: 'boolean' },
+                    agreeToTerms: { type: 'boolean' },
+                  },
+                  required: [
+                    'customerType',
+                    'fileName',
+                    'sizeNeeded',
+                    'quantityNeeded',
+                    'projectTimeline',
+                    'technologyNeeded',
+                    'usage',
+                    'description',
+                    'firstName',
+                    'lastName',
+                    'workEmail',
+                    'countryCode',
+                    'countryName',
+                    'phoneDialCode',
+                    'phoneNumber',
+                    'hearAboutUs',
+                    'agreeToTerms',
+                  ],
+                },
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'Logo design quote saved',
+            },
+            400: {
+              description: 'Invalid payload',
+            },
+            500: {
+              description: 'Save failed',
+            },
+          },
+        },
+      },
     },
   }
 }

@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs'
 import cors from 'cors'
+import { randomUUID } from 'crypto'
 import dotenv from 'dotenv'
 import express from 'express'
 import jwt from 'jsonwebtoken'
@@ -14,10 +15,13 @@ const loginAttemptWindowMs = 15 * 60 * 1000
 const maxLoginAttempts = 5
 const designOrderWindowMs = 5 * 60 * 60 * 1000
 const maxDesignOrdersPerDevice = 3
+const logoDesignWindowMs = 5 * 60 * 60 * 1000
+const maxLogoDesignsPerDevice = 3
 const ordersCacheTtlMs = 30 * 1000
 const streamTokenExpiresIn = '2m'
 const loginAttempts = new Map()
 const designOrderAttempts = new Map()
+const logoDesignAttempts = new Map()
 const orderStreamClients = new Set()
 const ordersCache = {
   expiresAt: 0,
@@ -62,7 +66,7 @@ app.use((_request, response, next) => {
   response.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
   next()
 })
-app.use(express.json({ limit: '100kb' }))
+app.use(express.json({ limit: '8mb' }))
 
 const createOrdersTableSql = `
   CREATE TABLE IF NOT EXISTS neon_design_orders (
@@ -100,11 +104,81 @@ const insertDesignOrderSql = `
   RETURNING id, submitted_at
 `
 
+const createLogoDesignTableSql = `
+  CREATE TABLE IF NOT EXISTS logo_design (
+    id SERIAL PRIMARY KEY,
+    customer_type VARCHAR(20) NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    file_url TEXT NOT NULL,
+    size_needed VARCHAR(100) NOT NULL,
+    quantity_needed VARCHAR(100) NOT NULL,
+    project_timeline VARCHAR(100) NOT NULL,
+    technology_needed VARCHAR(100) NOT NULL,
+    usage VARCHAR(20) NOT NULL,
+    description VARCHAR(120) NOT NULL,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    work_email VARCHAR(255) NOT NULL,
+    company_name VARCHAR(255) NOT NULL DEFAULT '',
+    country_code VARCHAR(8) NOT NULL,
+    country_name VARCHAR(120) NOT NULL,
+    phone_dial_code VARCHAR(12) NOT NULL,
+    phone_number VARCHAR(40) NOT NULL,
+    hear_about_us VARCHAR(100) NOT NULL,
+    promo_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+    sms_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+    agree_to_terms BOOLEAN NOT NULL DEFAULT FALSE,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`
+
+const insertLogoDesignSql = `
+  INSERT INTO logo_design (
+    customer_type,
+    file_name,
+    file_url,
+    size_needed,
+    quantity_needed,
+    project_timeline,
+    technology_needed,
+    usage,
+    description,
+    first_name,
+    last_name,
+    work_email,
+    company_name,
+    country_code,
+    country_name,
+    phone_dial_code,
+    phone_number,
+    hear_about_us,
+    promo_opt_in,
+    sms_opt_in,
+    agree_to_terms
+  )
+  VALUES (
+    $1, $2, $3, $4, $5,
+    $6, $7, $8, $9, $10,
+    $11, $12, $13, $14, $15,
+    $16, $17, $18, $19, $20,
+    $21
+  )
+  RETURNING id, submitted_at
+`
+
 async function ensureOrdersTable() {
   await query(createOrdersTableSql)
   await query(`
     ALTER TABLE neon_design_orders
     ADD COLUMN IF NOT EXISTS step_1_font_name VARCHAR(100)
+  `)
+}
+
+async function ensureLogoDesignTable() {
+  await query(createLogoDesignTableSql)
+  await query(`
+    ALTER TABLE logo_design
+    ADD COLUMN IF NOT EXISTS file_url TEXT
   `)
 }
 
@@ -177,6 +251,18 @@ function registerDesignOrderAttempt(key) {
   )
 }
 
+function readLogoDesignAttemptState(key) {
+  return readWindowAttemptState(logoDesignAttempts, key, logoDesignWindowMs)
+}
+
+function registerLogoDesignAttempt(key) {
+  writeWindowAttemptState(
+    logoDesignAttempts,
+    key,
+    readLogoDesignAttemptState(key),
+  )
+}
+
 function createAccessToken(user) {
   return jwt.sign(
     {
@@ -237,7 +323,9 @@ function requireAdmin(request, response, next) {
 
 function serializeOrderRow(row) {
   return {
-    id: row.id,
+    id: `text-${row.id}`,
+    recordId: row.id,
+    orderType: 'text',
     text: row.step_1_text,
     alignment: row.step_1_alignment,
     fontId: row.step_1_font_id,
@@ -253,34 +341,107 @@ function serializeOrderRow(row) {
   }
 }
 
+function serializeLogoDesignRow(row) {
+  return {
+    id: `logo-design-${row.id}`,
+    recordId: row.id,
+    orderType: 'logo-design',
+    text: row.description,
+    alignment: null,
+    fontId: null,
+    fontName: null,
+    colorId: null,
+    colorName: null,
+    widthCm: null,
+    heightCm: null,
+    locationId: row.usage,
+    locationLabel: row.usage,
+    quotedPrice: null,
+    submittedAt: row.submitted_at,
+    customerType: row.customer_type,
+    fileName: row.file_name,
+    fileUrl: row.file_url,
+    sizeNeeded: row.size_needed,
+    quantityNeeded: row.quantity_needed,
+    projectTimeline: row.project_timeline,
+    technologyNeeded: row.technology_needed,
+    usage: row.usage,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    workEmail: row.work_email,
+    companyName: row.company_name,
+    countryCode: row.country_code,
+    countryName: row.country_name,
+    phoneDialCode: row.phone_dial_code,
+    phoneNumber: row.phone_number,
+    hearAboutUs: row.hear_about_us,
+    promoOptIn: row.promo_opt_in,
+    smsOptIn: row.sms_opt_in,
+    agreeToTerms: row.agree_to_terms,
+  }
+}
+
 function invalidateOrdersCache() {
   ordersCache.orders = null
   ordersCache.expiresAt = 0
 }
 
 async function loadOrdersFromDatabase() {
-  const result = await query(
-    `
-      SELECT
-        id,
-        step_1_text,
-        step_1_alignment,
-        step_1_font_id,
-        step_1_font_name,
-        step_2_color_id,
-        step_2_color_name,
-        step_3_width_cm,
-        step_3_height_cm,
-        step_4_location_id,
-        step_4_location_label,
-        quoted_price,
-        submitted_at
-      FROM neon_design_orders
-      ORDER BY submitted_at ASC, id ASC
-    `,
-  )
+  const [designOrdersResult, logoDesignOrdersResult] = await Promise.all([
+    query(
+      `
+        SELECT
+          id,
+          step_1_text,
+          step_1_alignment,
+          step_1_font_id,
+          step_1_font_name,
+          step_2_color_id,
+          step_2_color_name,
+          step_3_width_cm,
+          step_3_height_cm,
+          step_4_location_id,
+          step_4_location_label,
+          quoted_price,
+          submitted_at
+        FROM neon_design_orders
+      `,
+    ),
+    query(
+      `
+        SELECT
+          id,
+          customer_type,
+          file_name,
+          file_url,
+          size_needed,
+          quantity_needed,
+          project_timeline,
+          technology_needed,
+          usage,
+          description,
+          first_name,
+          last_name,
+          work_email,
+          company_name,
+          country_code,
+          country_name,
+          phone_dial_code,
+          phone_number,
+          hear_about_us,
+          promo_opt_in,
+          sms_opt_in,
+          agree_to_terms,
+          submitted_at
+        FROM logo_design
+      `,
+    ),
+  ])
 
-  return result.rows.map(serializeOrderRow)
+  return [
+    ...designOrdersResult.rows.map(serializeOrderRow),
+    ...logoDesignOrdersResult.rows.map(serializeLogoDesignRow),
+  ].sort(compareOrdersBySubmission)
 }
 
 async function getCachedOrders() {
@@ -302,6 +463,17 @@ function broadcastOrderCreated(order) {
   for (const client of orderStreamClients) {
     client.write(payload)
   }
+}
+
+function compareOrdersBySubmission(left, right) {
+  const leftTime = new Date(left.submittedAt).getTime()
+  const rightTime = new Date(right.submittedAt).getTime()
+
+  if (leftTime !== rightTime) {
+    return leftTime - rightTime
+  }
+
+  return Number(left.recordId || 0) - Number(right.recordId || 0)
 }
 
 function authenticateStreamToken(request, response, next) {
@@ -365,6 +537,141 @@ function isValidDesignOrder(order) {
     Number.isFinite(order.heightCm) &&
     Number.isFinite(order.quotedPrice)
   )
+}
+
+function normalizeLogoDesignPayload(body = {}) {
+  return {
+    customerType: String(body.customerType || '').trim(),
+    fileName: String(body.fileName || '').trim(),
+    fileMimeType: String(body.fileMimeType || '').trim().toLowerCase(),
+    fileDataUrl: String(body.fileDataUrl || '').trim(),
+    sizeNeeded: String(body.sizeNeeded || '').trim(),
+    quantityNeeded: String(body.quantityNeeded || '').trim(),
+    projectTimeline: String(body.projectTimeline || '').trim(),
+    technologyNeeded: String(body.technologyNeeded || '').trim(),
+    usage: String(body.usage || '').trim(),
+    description: String(body.description || '').trim().slice(0, 120),
+    firstName: String(body.firstName || '').trim(),
+    lastName: String(body.lastName || '').trim(),
+    workEmail: String(body.workEmail || '').trim().toLowerCase(),
+    companyName: String(body.companyName || '').trim(),
+    countryCode: String(body.countryCode || '').trim().toUpperCase(),
+    countryName: String(body.countryName || '').trim(),
+    phoneDialCode: String(body.phoneDialCode || '').trim(),
+    phoneNumber: String(body.phoneNumber || '').trim(),
+    hearAboutUs: String(body.hearAboutUs || '').trim(),
+    promoOptIn: Boolean(body.promoOptIn),
+    smsOptIn: Boolean(body.smsOptIn),
+    agreeToTerms: Boolean(body.agreeToTerms),
+  }
+}
+
+function isValidEmailAddress(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
+function isValidLogoDesignSubmission(quote) {
+  return (
+    ['individual', 'business'].includes(quote.customerType) &&
+    quote.fileName &&
+    ['image/png', 'image/jpeg'].includes(quote.fileMimeType) &&
+    quote.fileDataUrl.startsWith('data:') &&
+    quote.sizeNeeded &&
+    quote.quantityNeeded &&
+    quote.projectTimeline &&
+    quote.technologyNeeded &&
+    ['indoor', 'outdoor'].includes(quote.usage) &&
+    quote.description &&
+    quote.description.length <= 120 &&
+    quote.firstName &&
+    quote.lastName &&
+    quote.workEmail &&
+    isValidEmailAddress(quote.workEmail) &&
+    quote.countryCode &&
+    quote.countryName &&
+    /^\+\d{1,4}$/.test(quote.phoneDialCode) &&
+    quote.phoneNumber &&
+    quote.hearAboutUs &&
+    quote.agreeToTerms
+  )
+}
+
+function getLogoStorageConfig() {
+  const supabaseUrl = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '')
+  const serviceRoleKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+  const bucket = String(process.env.SUPABASE_STORAGE_BUCKET || 'logo-design').trim()
+
+  if (!supabaseUrl || !serviceRoleKey || !bucket) {
+    return null
+  }
+
+  return {
+    supabaseUrl,
+    serviceRoleKey,
+    bucket,
+  }
+}
+
+function parseDataUrl(dataUrl) {
+  const match = /^data:([^;]+);base64,(.+)$/i.exec(dataUrl)
+
+  if (!match) {
+    return null
+  }
+
+  return {
+    mimeType: match[1].toLowerCase(),
+    buffer: Buffer.from(match[2], 'base64'),
+  }
+}
+
+function sanitizeFileSegment(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+async function uploadLogoDesignAsset(quote) {
+  const storageConfig = getLogoStorageConfig()
+
+  if (!storageConfig) {
+    throw new Error(
+      'Storage is not configured. Set SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_STORAGE_BUCKET.',
+    )
+  }
+
+  const parsedDataUrl = parseDataUrl(quote.fileDataUrl)
+
+  if (!parsedDataUrl || parsedDataUrl.mimeType !== quote.fileMimeType) {
+    throw new Error('Uploaded file data is invalid.')
+  }
+
+  const fileExtension = quote.fileMimeType === 'image/png' ? 'png' : 'jpg'
+  const normalizedBaseName =
+    sanitizeFileSegment(quote.fileName.replace(/\.[^.]+$/, '')) || 'logo-design'
+  const objectPath = `quotes/${new Date().toISOString().slice(0, 10)}/${randomUUID()}-${normalizedBaseName}.${fileExtension}`
+
+  const uploadResponse = await fetch(
+    `${storageConfig.supabaseUrl}/storage/v1/object/${storageConfig.bucket}/${objectPath}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${storageConfig.serviceRoleKey}`,
+        apikey: storageConfig.serviceRoleKey,
+        'Content-Type': quote.fileMimeType,
+        'x-upsert': 'false',
+      },
+      body: parsedDataUrl.buffer,
+    },
+  )
+
+  if (!uploadResponse.ok) {
+    const errorText = await uploadResponse.text().catch(() => '')
+    throw new Error(`Storage upload failed: ${errorText || uploadResponse.statusText}`)
+  }
+
+  return `${storageConfig.supabaseUrl}/storage/v1/object/public/${storageConfig.bucket}/${objectPath}`
 }
 
 registerSwagger(app, port)
@@ -551,7 +858,9 @@ app.post('/api/design-orders', requireJsonRequest, async (request, response) => 
     )
 
     const savedOrder = {
-      id: result.rows[0].id,
+      id: `text-${result.rows[0].id}`,
+      recordId: result.rows[0].id,
+      orderType: 'text',
       ...normalizedOrder,
       submittedAt: result.rows[0].submitted_at,
     }
@@ -570,7 +879,109 @@ app.post('/api/design-orders', requireJsonRequest, async (request, response) => 
   }
 })
 
-ensureOrdersTable()
+app.post('/api/logo-design', requireJsonRequest, async (request, response) => {
+  const logoDesignClientKey = getDesignOrderClientKey(request)
+  const normalizedQuote = normalizeLogoDesignPayload(request.body)
+
+  if (!logoDesignClientKey) {
+    response.status(400).json({ error: 'Device identification is required.' })
+    return
+  }
+
+  const logoDesignState = readLogoDesignAttemptState(logoDesignClientKey)
+
+  if (!isValidLogoDesignSubmission(normalizedQuote)) {
+    response.status(400).json({ error: 'Complete the logo design quote form before submitting.' })
+    return
+  }
+
+  if (logoDesignState.count >= maxLogoDesignsPerDevice) {
+    response.status(429).json({
+      error: 'This device has reached the limit of 3 logo design submissions. Try again in 5 hours.',
+    })
+    return
+  }
+
+  try {
+    await ensureLogoDesignTable()
+    const fileUrl = await uploadLogoDesignAsset(normalizedQuote)
+
+    const result = await query(insertLogoDesignSql, [
+      normalizedQuote.customerType,
+      normalizedQuote.fileName,
+      fileUrl,
+      normalizedQuote.sizeNeeded,
+      normalizedQuote.quantityNeeded,
+      normalizedQuote.projectTimeline,
+      normalizedQuote.technologyNeeded,
+      normalizedQuote.usage,
+      normalizedQuote.description,
+      normalizedQuote.firstName,
+      normalizedQuote.lastName,
+      normalizedQuote.workEmail,
+      normalizedQuote.companyName,
+      normalizedQuote.countryCode,
+      normalizedQuote.countryName,
+      normalizedQuote.phoneDialCode,
+      normalizedQuote.phoneNumber,
+      normalizedQuote.hearAboutUs,
+      normalizedQuote.promoOptIn,
+      normalizedQuote.smsOptIn,
+      normalizedQuote.agreeToTerms,
+    ])
+
+    registerLogoDesignAttempt(logoDesignClientKey)
+    invalidateOrdersCache()
+    broadcastOrderCreated({
+      id: `logo-design-${result.rows[0].id}`,
+      recordId: result.rows[0].id,
+      orderType: 'logo-design',
+      text: normalizedQuote.description,
+      alignment: null,
+      fontId: null,
+      fontName: null,
+      colorId: null,
+      colorName: null,
+      widthCm: null,
+      heightCm: null,
+      locationId: normalizedQuote.usage,
+      locationLabel: normalizedQuote.usage,
+      quotedPrice: null,
+      submittedAt: result.rows[0].submitted_at,
+      customerType: normalizedQuote.customerType,
+      fileName: normalizedQuote.fileName,
+      fileUrl,
+      sizeNeeded: normalizedQuote.sizeNeeded,
+      quantityNeeded: normalizedQuote.quantityNeeded,
+      projectTimeline: normalizedQuote.projectTimeline,
+      technologyNeeded: normalizedQuote.technologyNeeded,
+      usage: normalizedQuote.usage,
+      firstName: normalizedQuote.firstName,
+      lastName: normalizedQuote.lastName,
+      workEmail: normalizedQuote.workEmail,
+      companyName: normalizedQuote.companyName,
+      countryCode: normalizedQuote.countryCode,
+      countryName: normalizedQuote.countryName,
+      phoneDialCode: normalizedQuote.phoneDialCode,
+      phoneNumber: normalizedQuote.phoneNumber,
+      hearAboutUs: normalizedQuote.hearAboutUs,
+      promoOptIn: normalizedQuote.promoOptIn,
+      smsOptIn: normalizedQuote.smsOptIn,
+      agreeToTerms: normalizedQuote.agreeToTerms,
+    })
+
+    response.status(201).json({
+      id: result.rows[0].id,
+      fileUrl,
+      submittedAt: result.rows[0].submitted_at,
+    })
+  } catch (error) {
+    console.error('Saving logo design quote failed:', error)
+    response.status(500).json({ error: 'Unable to save your logo design quote right now.' })
+  }
+})
+
+Promise.all([ensureOrdersTable(), ensureLogoDesignTable()])
   .then(() => {
     app.listen(port, () => {
       console.log(`Backend listening on http://localhost:${port}`)
